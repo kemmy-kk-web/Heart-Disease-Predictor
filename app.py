@@ -3,23 +3,25 @@ import pickle
 import numpy as np
 import streamlit as st
 from tensorflow import keras
+import shap
+import matplotlib.pyplot as plt
 
-# ---------------------------------------------------------------------------
+
 # Page config
-# ---------------------------------------------------------------------------
+
 st.set_page_config(page_title="Heart Disease Risk Predictor", page_icon="❤️", layout="centered")
 
-MODEL_PATH = "Heart_Disease.keras"
-KIT_PATH = "Heart_Disease_kit.pkl"
+Model_path = "Heart_Disease.keras"
+Kit_path = "Heart_Disease_kit.pkl"
 
 
-# ---------------------------------------------------------------------------
+
 # Load model + preprocessing kit (cached so it only loads once)
-# ---------------------------------------------------------------------------
+
 @st.cache_resource
 def load_model_and_kit():
-    model = keras.models.load_model(MODEL_PATH)
-    with open(KIT_PATH, "rb") as f:
+    model = keras.models.load_model(Model_path)
+    with open(Kit_path, "rb") as f:
         kit = pickle.load(f)
     return model, kit
 
@@ -31,8 +33,26 @@ scaler_scale = np.array(kit["scaler_scale"], dtype=np.float32)
 feature_cols = kit["feature_cols"]
 train_medians = kit["train_medians"]
 
-# Ordinal 0/1/2 features -> human-friendly labels (best-guess mapping;
-# adjust the LEVEL_LABELS dict below if you know the true category meanings).
+
+# Build a SHAP explainer once (cached). We use a small background dataset
+# built from the training medians, repeated a few times, since we don't
+# have direct access to a sample of real training rows here. If you have
+# a saved sample of real (scaled) training rows, swap it in below for a
+# more representative baseline.
+
+@st.cache_resource
+def get_explainer(_model, _scaler_mean, _scaler_scale, _feature_cols, _train_medians):
+    background_raw = np.array([[_train_medians[col] for col in _feature_cols]], dtype=np.float32)
+    background_scaled = (background_raw - _scaler_mean) / _scaler_scale
+    background = np.repeat(background_scaled, 50, axis=0)
+    explainer = shap.DeepExplainer(_model, background)
+    return explainer
+
+
+explainer = get_explainer(model, scaler_mean, scaler_scale, feature_cols, train_medians)
+
+
+
 LEVEL_LABELS = {0: "Low", 1: "Medium", 2: "High"}
 LEVEL_VALUES = {v: k for k, v in LEVEL_LABELS.items()}
 ORDINAL_FEATURES = {"Smoking", "Alcohol_Intake", "Physical_Activity", "Diet", "Stress_Level"}
@@ -46,20 +66,32 @@ BINARY_FEATURES = {
 }
 
 
-# ---------------------------------------------------------------------------
+
 # UI
-# ---------------------------------------------------------------------------
+
 st.title("❤️ Heart Disease Risk Predictor")
 st.caption(
     "Enter patient details below. This tool uses a trained neural network "
-    "and is for educational/demo purposes only — not a medical diagnosis."
+    "and is for educational/demo purposes only_ not a medical diagnosis."
 )
+#patient information-predict-trained model-prediction
+
+# Age is asked outside the form so the page can react to it immediately
+# (widgets inside st.form only update once the form is submitted).
+age = st.number_input("Age", min_value=1, max_value=120, value=int(train_medians["Age"]))
+
+if age <= 13:
+    st.info(
+        "This tool is designed to assess adult cardiovascular risk factors "
+        "(smoking, blood pressure, cholesterol, etc.) and is not applicable "
+        "to children. Please enter an age of 14 or above to continue."
+    )
+    st.stop()
 
 with st.form("patient_form"):
     st.subheader("Demographics")
     col1, col2 = st.columns(2)
     with col1:
-        age = st.number_input("Age", min_value=1, max_value=120, value=int(train_medians["Age"]))
         gender = st.selectbox("Gender", options=["Female", "Male"], index=0)
     with col2:
         weight = st.number_input("Weight (kg)", min_value=20.0, max_value=300.0, value=float(train_medians["Weight"]))
@@ -111,9 +143,9 @@ with st.form("patient_form"):
     submitted = st.form_submit_button("Predict", use_container_width=True)
 
 
-# ---------------------------------------------------------------------------
+
 # Prediction
-# ---------------------------------------------------------------------------
+
 if submitted:
     raw = {
         "Age": age,
@@ -158,10 +190,46 @@ if submitted:
     st.metric("Predicted probability of heart disease", f"{prob * 100:.1f}%")
     st.progress(min(max(prob, 0.0), 1.0))
 
-    with st.expander("See input values sent to the model"):
-        st.json(raw)
-
+    # --- SHAP explanation ---
+    st.subheader("Why this prediction?")
     st.caption(
+        "This chart shows how much each factor pushed the predicted risk "
+        "up (red) or down (green) for this specific patient, relative to a "
+        "typical baseline patient."
+    )
+
+    with st.spinner("Computing explanation..."):
+        shap_values = explainer.shap_values(x_scaled)
+        # For a single-output sigmoid model, shap_values is often a list
+        # with one array in it; handle both cases defensively.
+        sv = shap_values[0] if isinstance(shap_values, list) else shap_values
+        sv = np.array(sv).flatten()
+
+        def to_scalar(v):
+            # Handles plain floats, numpy arrays/scalars, lists, and
+            # TensorFlow tensors, converting any of them to a plain float.
+            if isinstance(v, (list, tuple)):
+                v = v[0]
+            if hasattr(v, "numpy"):
+                v = v.numpy()
+            v = np.array(v).flatten()
+            return float(v[0])
+
+        base_value = to_scalar(explainer.expected_value)
+
+        explanation = shap.Explanation(
+            values=sv,
+            base_values=base_value,
+            data=x[0],
+            feature_names=feature_cols,
+        )
+
+        fig, ax = plt.subplots(figsize=(8, 6))
+        shap.plots.bar(explanation, show=False)
+        st.pyplot(fig)
+        plt.close(fig)
+
+    st.warning(
         "⚠️ This prediction is generated by a machine learning model for demonstration "
         "purposes only. It is not a substitute for professional medical advice, diagnosis, "
         "or treatment. Always consult a qualified healthcare provider."
