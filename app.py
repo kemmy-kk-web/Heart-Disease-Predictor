@@ -34,12 +34,6 @@ feature_cols = kit["feature_cols"]
 train_medians = kit["train_medians"]
 
 
-# Build a SHAP explainer once (cached). We use a small background dataset
-# built from the training medians, repeated a few times, since we don't
-# have direct access to a sample of real training rows here. If you have
-# a saved sample of real (scaled) training rows, swap it in below for a
-# more representative baseline.
-
 @st.cache_resource
 def get_explainer(_model, _scaler_mean, _scaler_scale, _feature_cols, _train_medians):
     background_raw = np.array([[_train_medians[col] for col in _feature_cols]], dtype=np.float32)
@@ -190,7 +184,7 @@ if submitted:
     st.metric("Predicted probability of heart disease", f"{prob * 100:.1f}%")
     st.progress(min(max(prob, 0.0), 1.0))
 
-    # --- SHAP explanation ---
+    # SHAP explanation 
     st.subheader("Why this prediction?")
     st.caption(
         "This chart shows how much each factor pushed the predicted risk "
@@ -207,7 +201,7 @@ if submitted:
 
         def to_scalar(v):
             # Handles plain floats, numpy arrays/scalars, lists, and
-            # TensorFlow tensors, converting any of them to a plain float.
+            # TensorFlow tensors, converting any of them to a single float.
             if isinstance(v, (list, tuple)):
                 v = v[0]
             if hasattr(v, "numpy"):
